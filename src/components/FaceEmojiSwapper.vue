@@ -10,7 +10,7 @@
       <!-- Step 1: Upload Image -->
       <div class="mb-6">
         <h2 class="text-xl font-semibold mb-3 text-gray-700">
-          1. Upload an image with faces
+          1. Upload an image with faces (works best for portraits!)
         </h2>
         <div
           class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:bg-gray-50 transition"
@@ -114,6 +114,31 @@
             <span>Larger</span>
           </div>
         </div>
+
+        <!-- Background Transparency Slider -->
+        <div class="mb-4">
+          <label
+            for="bg-transparency"
+            class="block text-sm font-medium text-gray-700 mb-1"
+          >
+            Background Transparency: {{ backgroundTransparency }}%
+          </label>
+          <input
+            id="bg-transparency"
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            v-model="backgroundTransparency"
+            @change="applyEmojiSize"
+            class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+          />
+          <div class="flex justify-between text-xs text-gray-500 mt-1">
+            <span>Transparent</span>
+            <span>Opaque</span>
+          </div>
+        </div>
+
         <div class="flex justify-center">
           <img
             :src="resultImage"
@@ -162,6 +187,7 @@ const selectedEmoji = ref(null);
 const isProcessing = ref(false);
 const isLoading = ref(true);
 const emojiSizePercent = ref(100);
+const backgroundTransparency = ref(0); // Default to 0% opacity (100% transparency)
 const detectedFaces = ref([]);
 
 // Available emojis
@@ -282,30 +308,20 @@ const applyEmojiSize = async () => {
       const centerX = boundingBox.originX + boundingBox.width / 2;
       const centerY = boundingBox.originY + boundingBox.height / 2;
 
-      // Save the current canvas state
-      ctx.save();
-
-      // Create a clipping region
+      // Draw a semi-transparent circle to cover the face area
+      // Use the background transparency value (convert from percentage to decimal)
+      const opacity = backgroundTransparency.value / 100;
+      ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
       ctx.beginPath();
-      ctx.ellipse(
-        centerX,
-        centerY,
-        adjustedWidth / 2,
-        adjustedHeight / 2,
-        0,
-        0,
-        2 * Math.PI
-      );
-      ctx.clip();
+      ctx.arc(centerX, centerY, adjustedWidth / 2, 0, 2 * Math.PI);
+      ctx.fill();
 
-      // Draw the emoji
+      // Draw the emoji with full opacity
+      ctx.fillStyle = "#000000"; // Reset to solid black for the emoji
       ctx.font = `${adjustedHeight}px Arial`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(selectedEmoji.value, centerX, centerY);
-
-      // Restore the canvas state
-      ctx.restore();
     });
 
     // Convert the canvas to an image
@@ -365,30 +381,20 @@ const transformImage = async () => {
         const centerX = boundingBox.originX + boundingBox.width / 2;
         const centerY = boundingBox.originY + boundingBox.height / 2;
 
-        // Save the current canvas state
-        ctx.save();
-
-        // Instead of clearing the face area, we'll create a clipping region
+        // Draw a semi-transparent circle to cover the face area
+        // Use the background transparency value (convert from percentage to decimal)
+        const opacity = backgroundTransparency.value / 100;
+        ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
         ctx.beginPath();
-        ctx.ellipse(
-          centerX,
-          centerY,
-          adjustedWidth / 2,
-          adjustedHeight / 2,
-          0,
-          0,
-          2 * Math.PI
-        );
-        ctx.clip();
+        ctx.arc(centerX, centerY, adjustedWidth / 2, 0, 2 * Math.PI);
+        ctx.fill();
 
-        // Draw the emoji
+        // Draw the emoji with full opacity
+        ctx.fillStyle = "#000000"; // Reset to solid black for the emoji
         ctx.font = `${adjustedHeight}px Arial`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(selectedEmoji.value, centerX, centerY);
-
-        // Restore the canvas state
-        ctx.restore();
       });
 
       // Convert the canvas to an image
