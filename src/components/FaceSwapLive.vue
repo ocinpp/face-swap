@@ -52,7 +52,7 @@ import { Camera } from "@mediapipe/camera_utils";
 import { useScriptTag } from "@vueuse/core";
 
 useScriptTag(
-  "https://docs.opencv.org/4.5.5/opencv.js",
+  "https://docs.opencv.org/4.11.0/opencv.js",
   // on script tag loaded.
   (el) => {
     // do something
@@ -72,8 +72,9 @@ let photoLandmarks = null;
 const isOpenCVLoaded = ref(false);
 
 // OpenCV.js load callback
-window.onOpenCVLoaded = () => {
+window.onOpenCVLoaded = async () => {
   console.log("OpenCV.js loaded");
+  cv = cv instanceof Promise ? await cv : cv;
   isOpenCVLoaded.value = true;
 };
 
@@ -93,7 +94,7 @@ const initFaceMesh = async () => {
     });
     faceMesh.onResults(onLiveResults);
     console.log("FaceMesh initialized");
-    await new Promise((resolve) => setTimeout(resolve, 1000)); // Ensure initialization
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   } catch (error) {
     console.error("Failed to initialize FaceMesh:", error);
     throw error;
@@ -128,22 +129,25 @@ const swapFace = (ctx, landmarks) => {
 // Custom function to detect face in static image
 const detectFaceInImage = async (image) => {
   try {
-    return new Promise((resolve) => {
+    console.log("Starting face detection for image...");
+    const results = await new Promise((resolve) => {
       const tempCallback = (results) => {
         console.log("Static FaceMesh results:", results);
         resolve(results);
-        faceMesh.onResults(onLiveResults); // Restore live callback
+        faceMesh.onResults(onLiveResults);
       };
       faceMesh.onResults(tempCallback);
-      console.log("Sending static image to FaceMesh...");
+      console.log("Sending image to FaceMesh...");
       faceMesh.send({ image }).catch((err) => {
         console.error("FaceMesh send error:", err);
         resolve(null);
         faceMesh.onResults(onLiveResults);
       });
     });
+    console.log("Face detection completed:", results);
+    return results;
   } catch (error) {
-    console.error("Error in detectFaceInImage:", error);
+    console.error("Error in detectFaceInImage:", error, "Stack:", error.stack);
     return null;
   }
 };
@@ -182,8 +186,8 @@ const uploadPhoto = async (event) => {
       photoLandmarks = null;
     }
   } catch (error) {
-    console.error("Error in uploadPhoto:", error);
-    alert("Error processing photo!");
+    console.error("Error in uploadPhoto:", error, "Stack:", error.stack);
+    alert("Error processing photo: " + (error.message || "Unknown error"));
   }
 };
 
@@ -201,8 +205,8 @@ const startCamera = async () => {
     await camera.start();
     console.log("Camera started");
   } catch (error) {
-    console.error("Error starting camera:", error);
-    alert("Failed to start camera!");
+    console.error("Error starting camera:", error, "Stack:", error.stack);
+    alert("Failed to start camera: " + (error.message || "Unknown error"));
   }
 };
 
@@ -212,30 +216,35 @@ const captureImage = () => {
     liveSwapSrc.value = canvas.value.toDataURL("image/png");
     console.log("Live swap captured");
   } catch (error) {
-    console.error("Error capturing live swap:", error);
-    alert("Error capturing image!");
+    console.error("Error capturing live swap:", error, "Stack:", error.stack);
+    alert("Error capturing image: " + (error.message || "Unknown error"));
   }
 };
 
 // Swap live feed face onto the photo with alpha blending
 const swapPhotoWithLive = async () => {
   try {
-    if (!isOpenCVLoaded.value) {
-      alert("OpenCV.js is still loading, please wait!");
+    console.log("Starting swapPhotoWithLive...");
+    if (!isOpenCVLoaded.value || typeof cv === "undefined" || !cv.Mat) {
+      console.error("OpenCV.js not fully loaded or initialized!");
+      alert("OpenCV.js not ready! Please wait and try again.");
       return;
     }
     if (!photoSrc.value || !photoLandmarks) {
       alert("Please upload a photo with a detectable face first!");
       return;
     }
-    if (!video.value || !video.value.readyState >= 2) {
-      alert("Camera not ready!");
+    if (!video.value || video.value.readyState < 2) {
+      alert("Camera not ready! Please start the camera first.");
       return;
     }
 
     if (!faceMesh) await initFaceMesh();
+
+    // Step 1: Detect live face
     console.log("Detecting live face...");
     const liveResults = await detectFaceInImage(video.value);
+    console.log("Live detection results:", liveResults);
     if (!liveResults?.multiFaceLandmarks?.length) {
       alert("No face detected in the live feed!");
       return;
@@ -243,11 +252,18 @@ const swapPhotoWithLive = async () => {
     const liveLandmarks = liveResults.multiFaceLandmarks[0];
     console.log("Live landmarks:", liveLandmarks);
 
+    // Step 2: Setup canvas
+    console.log("Creating temp canvas...");
     const tempCanvas = document.createElement("canvas");
     tempCanvas.width = photoImage.width;
     tempCanvas.height = photoImage.height;
     const ctx = tempCanvas.getContext("2d");
-    ctx.drawImage(photoImage, 0, 0);
+    try {
+      ctx.drawImage(photoImage, 0, 0);
+      console.log("Photo drawn to canvas");
+    } catch (drawError) {
+      throw new Error("Failed to draw photo to canvas: " + drawError.message);
+    }
 
     if (!photoLandmarks[234] || !liveLandmarks[234]) {
       console.error("Landmarks missing:", { photoLandmarks, liveLandmarks });
@@ -255,6 +271,8 @@ const swapPhotoWithLive = async () => {
       return;
     }
 
+    // Step 3: Calculate transform
+    console.log("Calculating transform...");
     const photoPoints = [
       [
         photoLandmarks[234].x * photoImage.width,
@@ -283,115 +301,402 @@ const swapPhotoWithLive = async () => {
         liveLandmarks[0].y * canvas.value.height,
       ],
     ];
-
     const transform = getAffineTransform(livePoints, photoPoints);
+    console.log("Transform calculated:", transform);
 
-    const liveFaceWidth =
+    // Step 4: Extract live face
+    console.log("Extracting live face...");
+    const liveFaceWidth = Math.max(
+      1,
       Math.abs(liveLandmarks[234].x - liveLandmarks[454].x) *
-      canvas.value.width *
-      1.5;
-    const liveFaceHeight =
+        canvas.value.width *
+        1.5
+    );
+    const liveFaceHeight = Math.max(
+      1,
       Math.abs(liveLandmarks[152].y - liveLandmarks[10].y) *
-      canvas.value.height *
-      1.5;
+        canvas.value.height *
+        1.5
+    );
     const liveFaceX =
       liveLandmarks[234].x * canvas.value.width - liveFaceWidth * 0.25;
     const liveFaceY =
       liveLandmarks[10].y * canvas.value.height - liveFaceHeight * 0.25;
 
+    console.log("Live face dimensions:", {
+      liveFaceWidth,
+      liveFaceHeight,
+      liveFaceX,
+      liveFaceY,
+    });
+
     const liveCanvas = document.createElement("canvas");
     liveCanvas.width = liveFaceWidth;
     liveCanvas.height = liveFaceHeight;
     const liveCtx = liveCanvas.getContext("2d");
-    liveCtx.drawImage(
-      video.value,
-      liveFaceX,
-      liveFaceY,
-      liveFaceWidth,
-      liveFaceHeight,
-      0,
-      0,
-      liveFaceWidth,
-      liveFaceHeight
-    );
+    try {
+      liveCtx.drawImage(
+        video.value,
+        liveFaceX,
+        liveFaceY,
+        liveFaceWidth,
+        liveFaceHeight,
+        0,
+        0,
+        liveFaceWidth,
+        liveFaceHeight
+      );
+      console.log("Live face drawn to canvas");
+    } catch (drawError) {
+      throw new Error(
+        "Failed to draw live face to canvas: " + drawError.message
+      );
+    }
 
+    // Step 5: OpenCV blending
     console.log("Starting OpenCV blending...");
-    const srcMat = cv.imread(photoImage);
-    const liveMat = cv.imread(liveCanvas);
-
-    const maskMat = new cv.Mat(liveFaceHeight, liveFaceWidth, cv.CV_8UC1);
-    maskMat.setTo(new cv.Scalar(0));
-    cv.rectangle(
-      maskMat,
-      new cv.Point(10, 10),
-      new cv.Point(liveFaceWidth - 10, liveFaceHeight - 10),
-      new cv.Scalar(255),
-      -1
-    );
-    cv.GaussianBlur(maskMat, maskMat, new cv.Size(21, 21), 0);
-
-    const warpMat = cv.matFromArray(2, 3, cv.CV_32FC1, transform);
-    const warpedLiveMat = new cv.Mat();
-    const warpedMaskMat = new cv.Mat();
-    cv.warpAffine(
+    let srcMat,
       liveMat,
-      warpedLiveMat,
-      warpMat,
-      srcMat.size(),
-      cv.INTER_LINEAR,
-      cv.BORDER_CONSTANT,
-      new cv.Scalar()
-    );
-    cv.warpAffine(
       maskMat,
-      warpedMaskMat,
       warpMat,
-      srcMat.size(),
-      cv.INTER_LINEAR,
-      cv.BORDER_CONSTANT,
-      new cv.Scalar()
-    );
-
-    const alphaMat = new cv.Mat();
-    warpedMaskMat.convertTo(alphaMat, cv.CV_32FC1, 1 / 255.0);
-
-    const oneMinusAlpha = new cv.Mat();
-    cv.subtract(
-      cv.Mat.ones(alphaMat.rows, alphaMat.cols, cv.CV_32FC1),
+      warpedLiveMat,
+      warpedMaskMat,
       alphaMat,
-      oneMinusAlpha
-    );
+      oneMinusAlpha,
+      liveWeighted,
+      srcWeighted,
+      resultMat,
+      finalMat,
+      srcMatFloat,
+      warpedLiveMatFloat,
+      alphaMatC3,
+      oneMinusAlphaC3,
+      alphaChannels,
+      oneMinusAlphaChannels;
+    try {
+      srcMat = cv.imread(photoImage);
+      console.log("Source Mat created:", {
+        rows: srcMat.rows,
+        cols: srcMat.cols,
+        type: srcMat.type(),
+      });
+      liveMat = cv.imread(liveCanvas);
+      console.log("Live Mat created:", {
+        rows: liveMat.rows,
+        cols: liveMat.cols,
+        type: liveMat.type(),
+      });
 
-    const liveWeighted = new cv.Mat();
-    const srcWeighted = new cv.Mat();
-    cv.multiply(warpedLiveMat, alphaMat, liveWeighted, 1.0, cv.CV_32FC3);
-    cv.multiply(srcMat, oneMinusAlpha, srcWeighted, 1.0, cv.CV_32FC3);
+      maskMat = new cv.Mat(liveFaceHeight, liveFaceWidth, cv.CV_8UC1);
+      console.log("maskMat created:", {
+        rows: maskMat.rows,
+        cols: maskMat.cols,
+        type: maskMat.type(),
+      });
+      maskMat.setTo(new cv.Scalar(0));
+      cv.rectangle(
+        maskMat,
+        new cv.Point(10, 10),
+        new cv.Point(liveFaceWidth - 10, liveFaceHeight - 10),
+        new cv.Scalar(255),
+        -1
+      );
+      cv.GaussianBlur(maskMat, maskMat, new cv.Size(21, 21), 0);
+      console.log("Mask created");
 
-    const resultMat = new cv.Mat();
-    cv.add(liveWeighted, srcWeighted, resultMat);
+      warpMat = cv.matFromArray(2, 3, cv.CV_32FC1, transform);
+      warpedLiveMat = new cv.Mat();
+      warpedMaskMat = new cv.Mat();
+      cv.warpAffine(
+        liveMat,
+        warpedLiveMat,
+        warpMat,
+        srcMat.size(),
+        cv.INTER_LINEAR,
+        cv.BORDER_CONSTANT,
+        new cv.Scalar()
+      );
+      console.log("Live face warped:", {
+        rows: warpedLiveMat.rows,
+        cols: warpedLiveMat.cols,
+        type: warpedLiveMat.type(),
+      });
+      cv.warpAffine(
+        maskMat,
+        warpedMaskMat,
+        warpMat,
+        srcMat.size(),
+        cv.INTER_LINEAR,
+        cv.BORDER_CONSTANT,
+        new cv.Scalar()
+      );
+      console.log("Mask warped:", {
+        rows: warpedMaskMat.rows,
+        cols: warpedMaskMat.cols,
+        type: warpedMaskMat.type(),
+      });
 
-    const finalMat = new cv.Mat();
-    resultMat.convertTo(finalMat, cv.CV_8UC3);
+      alphaMat = new cv.Mat();
+      warpedMaskMat.convertTo(alphaMat, cv.CV_32FC1, 1 / 255.0);
+      console.log("Alpha Mat created:", {
+        rows: alphaMat.rows,
+        cols: alphaMat.cols,
+        type: alphaMat.type(),
+      });
 
-    cv.imshow(tempCanvas, finalMat);
-    photoSwapSrc.value = tempCanvas.toDataURL("image/png");
-    console.log("Photo swap completed");
+      oneMinusAlpha = new cv.Mat();
+      cv.subtract(
+        cv.Mat.ones(alphaMat.rows, alphaMat.cols, cv.CV_32FC1),
+        alphaMat,
+        oneMinusAlpha
+      );
+      console.log("One minus alpha created:", {
+        rows: oneMinusAlpha.rows,
+        cols: oneMinusAlpha.cols,
+        type: oneMinusAlpha.type(),
+      });
 
-    srcMat.delete();
-    liveMat.delete();
-    maskMat.delete();
-    warpedLiveMat.delete();
-    warpedMaskMat.delete();
-    alphaMat.delete();
-    oneMinusAlpha.delete();
-    liveWeighted.delete();
-    srcWeighted.delete();
-    resultMat.delete();
-    finalMat.delete();
-    warpMat.delete();
+      // Convert warpedLiveMat to CV_32FC3 before multiplication
+      warpedLiveMatFloat = new cv.Mat();
+      warpedLiveMat.convertTo(warpedLiveMatFloat, cv.CV_32FC3);
+      console.log("Converted warpedLiveMat to float:", {
+        rows: warpedLiveMatFloat.rows,
+        cols: warpedLiveMatFloat.cols,
+        type: warpedLiveMatFloat.type(),
+      });
+
+      // Convert srcMat to CV_32FC3 before multiplication
+      srcMatFloat = new cv.Mat();
+      srcMat.convertTo(srcMatFloat, cv.CV_32FC3);
+      console.log("Converted srcMat to float:", {
+        rows: srcMatFloat.rows,
+        cols: srcMatFloat.cols,
+        type: srcMatFloat.type(),
+      });
+
+      // Create 3-channel alpha mat for multiplication with RGB image
+      alphaMatC3 = new cv.Mat();
+      alphaChannels = new cv.MatVector();
+      alphaChannels.push_back(alphaMat);
+      alphaChannels.push_back(alphaMat);
+      alphaChannels.push_back(alphaMat);
+      cv.merge(alphaChannels, alphaMatC3);
+      console.log("Created 3-channel alpha mat:", {
+        rows: alphaMatC3.rows,
+        cols: alphaMatC3.cols,
+        type: alphaMatC3.type(),
+        channels: alphaMatC3.channels(),
+      });
+
+      // Create 3-channel oneMinusAlpha for multiplication with RGB image
+      oneMinusAlphaC3 = new cv.Mat();
+      oneMinusAlphaChannels = new cv.MatVector();
+      oneMinusAlphaChannels.push_back(oneMinusAlpha);
+      oneMinusAlphaChannels.push_back(oneMinusAlpha);
+      oneMinusAlphaChannels.push_back(oneMinusAlpha);
+      cv.merge(oneMinusAlphaChannels, oneMinusAlphaC3);
+      console.log("Created 3-channel oneMinusAlpha:", {
+        rows: oneMinusAlphaC3.rows,
+        cols: oneMinusAlphaC3.cols,
+        type: oneMinusAlphaC3.type(),
+        channels: oneMinusAlphaC3.channels(),
+      });
+
+      liveWeighted = new cv.Mat();
+      try {
+        // Make sure dimensions match
+        if (
+          warpedLiveMatFloat.rows !== alphaMatC3.rows ||
+          warpedLiveMatFloat.cols !== alphaMatC3.cols
+        ) {
+          console.log("Dimension mismatch, resizing alphaMatC3");
+          const resizedAlphaMatC3 = new cv.Mat();
+          cv.resize(
+            alphaMatC3,
+            resizedAlphaMatC3,
+            new cv.Size(warpedLiveMatFloat.cols, warpedLiveMatFloat.rows)
+          );
+          alphaMatC3.delete();
+          alphaMatC3 = resizedAlphaMatC3;
+        }
+
+        // Use element-wise multiplication
+        cv.multiply(warpedLiveMatFloat, alphaMatC3, liveWeighted);
+        console.log("Live weighted calculated:", {
+          rows: liveWeighted.rows,
+          cols: liveWeighted.cols,
+          type: liveWeighted.type(),
+          channels: liveWeighted.channels(),
+        });
+      } catch (multiplyError) {
+        console.log("Multiply error details:", multiplyError);
+        // Try alternative approach if the first one fails
+        try {
+          console.log("Trying alternative multiplication approach");
+          // Split the image into channels and multiply each channel separately
+          const channels = new cv.MatVector();
+          cv.split(warpedLiveMatFloat, channels);
+
+          const resultChannels = new cv.MatVector();
+          for (let i = 0; i < 3; i++) {
+            const resultChannel = new cv.Mat();
+            cv.multiply(channels.get(i), alphaMat, resultChannel);
+            resultChannels.push_back(resultChannel);
+            channels.get(i).delete();
+          }
+
+          cv.merge(resultChannels, liveWeighted);
+
+          // Clean up
+          for (let i = 0; i < 3; i++) {
+            resultChannels.get(i).delete();
+          }
+          resultChannels.delete();
+          channels.delete();
+        } catch (altError) {
+          console.log("Alternative approach failed:", altError);
+          throw new Error(
+            "cv.multiply failed for liveWeighted: " +
+              (multiplyError.message || "Unknown error")
+          );
+        }
+      }
+
+      srcWeighted = new cv.Mat();
+      try {
+        // Make sure dimensions match
+        if (
+          srcMatFloat.rows !== oneMinusAlphaC3.rows ||
+          srcMatFloat.cols !== oneMinusAlphaC3.cols
+        ) {
+          console.log("Dimension mismatch, resizing oneMinusAlphaC3");
+          const resizedOneMinusAlphaC3 = new cv.Mat();
+          cv.resize(
+            oneMinusAlphaC3,
+            resizedOneMinusAlphaC3,
+            new cv.Size(srcMatFloat.cols, srcMatFloat.rows)
+          );
+          oneMinusAlphaC3.delete();
+          oneMinusAlphaC3 = resizedOneMinusAlphaC3;
+        }
+
+        cv.multiply(srcMatFloat, oneMinusAlphaC3, srcWeighted);
+        console.log("Source weighted calculated:", {
+          rows: srcWeighted.rows,
+          cols: srcWeighted.cols,
+          type: srcWeighted.type(),
+          channels: srcWeighted.channels(),
+        });
+      } catch (multiplyError) {
+        // Try alternative approach
+        try {
+          console.log("Trying alternative multiplication approach for source");
+          // Split the image into channels and multiply each channel separately
+          const channels = new cv.MatVector();
+          cv.split(srcMatFloat, channels);
+
+          const resultChannels = new cv.MatVector();
+          for (let i = 0; i < 3; i++) {
+            const resultChannel = new cv.Mat();
+            cv.multiply(channels.get(i), oneMinusAlpha, resultChannel);
+            resultChannels.push_back(resultChannel);
+            channels.get(i).delete();
+          }
+
+          cv.merge(resultChannels, srcWeighted);
+
+          // Clean up
+          for (let i = 0; i < 3; i++) {
+            resultChannels.get(i).delete();
+          }
+          resultChannels.delete();
+          channels.delete();
+        } catch (altError) {
+          throw new Error(
+            "cv.multiply failed for srcWeighted: " +
+              (multiplyError.message || "Unknown error")
+          );
+        }
+      }
+
+      resultMat = new cv.Mat();
+      cv.add(liveWeighted, srcWeighted, resultMat);
+      console.log("Result Mat created:", {
+        rows: resultMat.rows,
+        cols: resultMat.cols,
+        type: resultMat.type(),
+      });
+
+      finalMat = new cv.Mat();
+      resultMat.convertTo(finalMat, cv.CV_8UC3);
+      console.log("Final Mat converted:", {
+        rows: finalMat.rows,
+        cols: finalMat.cols,
+        type: finalMat.type(),
+      });
+
+      cv.imshow(tempCanvas, finalMat);
+      photoSwapSrc.value = tempCanvas.toDataURL("image/png");
+      console.log("Photo swap completed");
+    } catch (cvError) {
+      console.error(
+        "OpenCV blending failed:",
+        cvError,
+        "Stack:",
+        cvError.stack
+      );
+      alert(
+        "OpenCV blending failed: " + (cvError.message || "Unknown OpenCV error")
+      );
+      // Fallback to Canvas blending
+      console.log("Falling back to Canvas blending...");
+      try {
+        ctx.globalAlpha = 0.5;
+        ctx.drawImage(
+          liveCanvas,
+          liveFaceX,
+          liveFaceY,
+          liveFaceWidth,
+          liveFaceHeight
+        );
+        ctx.globalAlpha = 1.0;
+        photoSwapSrc.value = tempCanvas.toDataURL("image/png");
+        console.log("Canvas fallback completed");
+      } catch (fallbackError) {
+        throw new Error("Canvas fallback failed: " + fallbackError.message);
+      }
+    } finally {
+      // Clean up resources
+      [
+        srcMat,
+        liveMat,
+        maskMat,
+        warpMat,
+        warpedLiveMat,
+        warpedMaskMat,
+        alphaMat,
+        oneMinusAlpha,
+        liveWeighted,
+        srcWeighted,
+        resultMat,
+        finalMat,
+        srcMatFloat,
+        warpedLiveMatFloat,
+        alphaMatC3,
+        oneMinusAlphaC3,
+      ].forEach((mat) => mat?.delete());
+
+      // Clean up vectors
+      if (alphaChannels) alphaChannels.delete();
+      if (oneMinusAlphaChannels) oneMinusAlphaChannels.delete();
+
+      console.log("Resources cleaned up");
+    }
   } catch (error) {
-    console.error("Error in swapPhotoWithLive:", error);
-    alert("Error swapping photo with live: " + error.message);
+    console.error("Error in swapPhotoWithLive:", error, "Stack:", error.stack);
+    alert(
+      "Error swapping photo with live: " + (error.message || "Unknown error")
+    );
   }
 };
 
@@ -452,13 +757,14 @@ onMounted(async () => {
   try {
     await initFaceMesh();
   } catch (error) {
-    console.error("Error during mount:", error);
+    console.error("Error during mount:", error, "Stack:", error.stack);
   }
 });
 </script>
 
 <style scoped>
 @reference "tailwindcss";
+
 .btn {
   @apply py-2 px-4 bg-blue-500 text-white rounded hover:bg-blue-600;
 }
